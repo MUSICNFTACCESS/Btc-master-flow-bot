@@ -1,10 +1,24 @@
 {
   "name": "btc-master-flow-bot",
   "version": "1.0.0",
-  "type": "module",
-  "scripts": { "start": "node index.js" },
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MUSICNFTACCESS/Btc-master-flow-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/MUSICNFTACCESS/Btc-master-flow-bot/issues"
+  },
+  "homepage": "https://github.com/MUSICNFTACCESS/Btc-master-flow-bot#readme",
   "dependencies": {
-    "axios": "^1.7.9",
-    "cheerio": "^1.0.0"
+    "axios": "^1.15.2"
   }
 }
