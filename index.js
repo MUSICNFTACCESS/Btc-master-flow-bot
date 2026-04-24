@@ -1,165 +1,162 @@
 const axios = require("axios");
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-let lastPrice = null;
-
-// ===== FORMAT =====
-function format(n) {
-  if (!n) return "N/A";
-  return Math.round(n).toLocaleString("en-US");
+// ===== HELPERS =====
+function nowET() {
+  return new Date().toLocaleTimeString("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
 }
 
-// ===== BTC =====
-async function getBTC() {
+async function fetchPrice(id) {
   try {
-    const r = await axios.get("https://api.coinbase.com/v2/prices/BTC-USD/spot");
-    return parseFloat(r.data.data.amount);
-  } catch { return null; }
+    const res = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`);
+    return res.data[id].usd;
+  } catch {
+    return null;
+  }
 }
 
-// ===== SOL =====
-async function getSOL() {
+async function fetchWTI() {
   try {
-    const r = await axios.get("https://api.coinbase.com/v2/prices/SOL-USD/spot");
-    return parseFloat(r.data.data.amount);
-  } catch { return null; }
+    const res = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/CL=F");
+    return res.data.chart.result[0].meta.regularMarketPrice;
+  } catch {
+    return null;
+  }
 }
 
-// ===== WTI =====
-async function getWTI() {
+// ===== ETF FLOWS (REAL SCRAPE LIGHT) =====
+async function fetchETF() {
   try {
-    const r = await axios.get("https://query1.finance.yahoo.com/v8/finance/chart/CL=F?interval=5m&range=1d");
-    return r.data.chart.result[0].meta.regularMarketPrice;
-  } catch { return null; }
-}
+    const res = await axios.get("https://farside.co.uk/btc/");
+    const text = res.data;
 
-// ===== ETF (SAFE FARSIDE) =====
-async function getETF() {
-  try {
-    const r = await axios.get("https://farside.co.uk/btc/");
-    const html = r.data;
+    const match = text.match(/(\+\$|\-\$)(\d+\.\d+)m/);
+    if (!match) return "not final";
 
-    const match = html.match(/Total[^>]*>\s*([-+0-9.,]+)/i);
-
-    if (match) {
-      const val = match[1].replace(/,/g, '');
-      const num = parseFloat(val);
-      return `BTC ${num > 0 ? "+" : ""}${num.toFixed(1)}m`;
-    }
-
-    return "not final";
+    return `BTC ${match[1]}${match[2]}m`;
   } catch {
     return "not final";
   }
 }
 
+// ===== OI + LIQUIDATIONS =====
+async function fetchDerivatives() {
+  try {
+    const res = await axios.get("https://fapi.binance.com/fapi/v1/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1");
+    const ratio = parseFloat(res.data[0].longShortRatio);
+
+    const oiRes = await axios.get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT");
+    const oi = parseFloat(oiRes.data.openInterest);
+
+    return { ratio, oi };
+  } catch {
+    return { ratio: null, oi: null };
+  }
+}
+
 // ===== RSI =====
-async function getRSI() {
+function calcRSI(prices) {
+  let gains = 0, losses = 0;
+  for (let i = 1; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses -= diff;
+  }
+  const rs = gains / (losses || 1);
+  return 100 - (100 / (1 + rs));
+}
+
+async function fetchRSI() {
   try {
-    const r = await axios.get("https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600");
-    const closes = r.data.slice(0, 50).map(c => c[4]);
-
-    let gains = 0, losses = 0;
-    for (let i = 1; i < closes.length; i++) {
-      let diff = closes[i] - closes[i - 1];
-      if (diff > 0) gains += diff;
-      else losses -= diff;
-    }
-
-    let rs = gains / (losses || 1);
-    return 100 - (100 / (1 + rs));
-
-  } catch { return null; }
+    const res = await axios.get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=50");
+    const closes = res.data.map(c => parseFloat(c[4]));
+    return calcRSI(closes);
+  } catch {
+    return null;
+  }
 }
 
-// ===== DIVERGENCE =====
-function getDiv(rsi, btc) {
-  if (!rsi || !btc) return "no data";
+// ===== SQUEEZE ENGINE =====
+function detectSqueeze(btc, oi, ratio) {
 
-  if (rsi > 65 && btc < 78000) return "1H bear div active";
-  if (rsi < 40 && btc < 76000) return "bull div building at support";
+  if (!oi || !ratio) return "NONE";
 
-  return "no meaningful div";
-}
-
-// ===== ENGINE =====
-function analyze(btc, rsi, div, wti) {
-
-  let structure = "lower high forming";
-  let action = "HOLD BTC SHORT";
-  let risk = "MEDIUM";
-
-  if (btc > 79400) structure = "trend shift risk";
-  if (btc < 75500) structure = "lower high confirmed";
-
-  if (rsi > 70) action = "ADD BTC SHORT";
-  if (rsi < 30) action = "BUY BTC";
-
-  if (btc < 76000 && div.includes("bull")) {
-    action = "DEPLOY HEAVY BTC LONG";
-    risk = "HIGH";
+  // HIGH OI + skewed longs = trap risk
+  if (oi > 100000 && ratio > 1.5 && btc < 79400) {
+    return "SHORT SQUEEZE RISK";
   }
 
-  if (btc < 76000 && div.includes("bear")) {
-    action = "DEPLOY HEAVY BTC SHORT";
-    risk = "HIGH";
+  // HIGH OI + longs trapped above resistance
+  if (oi > 100000 && ratio > 1.5 && btc >= 78000) {
+    return "LONG TRAP";
   }
 
-  let oilState = "MIXED";
-  if (wti > 95) oilState = "HEADWIND";
-  if (wti > 100) oilState = "PANIC RISK";
-
-  return { structure, action, risk, oilState };
-}
-
-// ===== SHIFT =====
-function getShift(btc) {
-  if (!lastPrice) {
-    lastPrice = btc;
-    return "NEUTRAL";
+  // heavy shorts + low ratio = squeeze up
+  if (ratio < 0.6) {
+    return "SHORTS STACKED";
   }
 
-  let shift = "NEUTRAL";
-
-  if (btc > lastPrice) shift = "MORE BULLISH";
-  if (btc < lastPrice) shift = "MORE BEARISH";
-
-  lastPrice = btc;
-  return shift;
+  return "NEUTRAL";
 }
 
-// ===== ALERT =====
-function buildAlert(btc, sol, etf, wti, analysis, div, shift) {
-
-  const time = new Date().toLocaleTimeString("en-US", {
-    timeZone: "America/New_York",
-    hour: "numeric",
-    minute: "2-digit"
-  });
-
-  return `BTC STRUCTURE ALERT | TIME: ${time} ET | BTC $${format(btc)} | STRUCTURE: ${analysis.structure} | SFP: weekly SFP forming | ETF FLOW: ${etf} | WTI $${format(wti)} | OIL STATE: ${analysis.oilState} | SHIFT ${shift} | BTC: ${analysis.action} | OIL: NO TRADE OIL | SPOT: HOLD SPOT | SOL: $${format(sol)} | ${analysis.risk} | ETF bid cushioning downside, but crypto lagging beta + Parrot ACTIVE while BTC below resistance; ${div}; NEXT bull trigger 78.33k, NEXT bear trigger 76.93k, BW:1/3`;
+// ===== CORE LOGIC =====
+function structure(btc) {
+  if (btc >= 79400) return "trend shift confirmed";
+  if (btc >= 76700) return "trend shift risk";
+  if (btc >= 75500) return "lower high forming";
+  return "lower high confirmed";
 }
 
-// ===== LOOP =====
+function sfp(btc) {
+  if (btc >= 79400) return "weekly SFP failed";
+  if (btc >= 78000) return "weekly SFP forming";
+  return "still valid below 79.4k";
+}
+
+function oilState(wti) {
+  if (!wti) return "MIXED";
+  if (wti > 95) return "HEADWIND";
+  if (wti < 85) return "TAILWIND";
+  return "MIXED";
+}
+
+function action(btc, squeeze) {
+
+  if (btc > 79400) return "BUY BTC";
+
+  if (btc >= 78000 && squeeze !== "SHORTS STACKED") {
+    return "ADD BTC SHORT";
+  }
+
+  if (btc < 75500) {
+    return "ADD BTC SHORT";
+  }
+
+  return "HOLD BTC SHORT";
+}
+
+// ===== MAIN LOOP =====
 async function run() {
-  try {
-    const btc = await getBTC(); await sleep(500);
-    const sol = await getSOL(); await sleep(500);
-    const wti = await getWTI(); await sleep(500);
-    const etf = await getETF(); await sleep(500);
-    const rsi = await getRSI();
 
-    const div = getDiv(rsi, btc);
-    const analysis = analyze(btc, rsi, div, wti);
-    const shift = getShift(btc);
+  const btc = await fetchPrice("bitcoin");
+  const sol = await fetchPrice("solana");
+  const wti = await fetchWTI();
+  const etf = await fetchETF();
+  const { ratio, oi } = await fetchDerivatives();
+  const rsi = await fetchRSI();
 
-    console.log(buildAlert(btc, sol, etf, wti, analysis, div, shift));
+  const squeeze = detectSqueeze(btc, oi, ratio);
 
-  } catch (e) {
-    console.log("BOT ERROR:", e.message);
-  }
+  const output =
+`BTC STRUCTURE ALERT | TIME: ${nowET()} ET | BTC $${btc} | STRUCTURE: ${structure(btc)} | SFP: ${sfp(btc)} | ETF FLOW: ${etf} | WTI $${wti} | OIL STATE: ${oilState(wti)} | SHIFT NEUTRAL | BTC: ${action(btc, squeeze)} | OIL: NO TRADE OIL | SPOT: HOLD SPOT | SOL: $${sol} | MEDIUM | ETF bid cushioning downside, but crypto lagging beta + Parrot ACTIVE while BTC below resistance; RSI ${rsi?.toFixed(0) || "N/A"}; ${squeeze}; NEXT bull 76.93k → 77.69k → 78.33k → 79.4k, NEXT bear 75.5k → 74.17k, BW:1/3`;
+
+  console.log(output);
 }
 
 setInterval(run, 900000);
 run();
+
